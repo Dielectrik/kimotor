@@ -6,6 +6,79 @@ import numpy as np
 from . import kimotor_linalg as kla
 import wx
 
+def winding_layout(n_slots, n_poles, n_phases=3):
+    """ Assign each slot coil to a phase and a polarity (star of slots method)
+
+    Args:
+        n_slots (int): number of slots (coils)
+        n_poles (int): number of rotor magnet poles
+        n_phases (int): number of phases (only 3 supported)
+
+    Returns:
+        list, float: (phase, polarity) of each slot, winding factor
+        (None, 0 if the combination cannot be wound as a balanced 3-phase)
+    """
+    if n_phases != 3 or n_poles < 2 or n_poles % 2 or n_slots % 3:
+        return None, 0
+
+    pp = n_poles // 2
+    # 60 deg phase belts: A+, C-, B+, A-, C+, B-
+    belt_phase = [0, 2, 1, 0, 2, 1]
+    belt_pol = [1, -1, 1, -1, 1, -1]
+
+    best, best_kw = None, 0
+    for offset in range(60):
+        layout = []
+        for k in range(n_slots):
+            # electrical angle of the coil back-EMF
+            a = (360.0 * pp * k / n_slots - offset) % 360
+            belt = int(a // 60) % 6
+            layout.append((belt_phase[belt], belt_pol[belt]))
+
+        if any(sum(1 for p, _ in layout if p == ph) != n_slots // 3 for ph in range(3)):
+            continue
+
+        # distribution factor of phase A
+        ea = [pol * complex(math.cos(2*math.pi*pp*k/n_slots), math.sin(2*math.pi*pp*k/n_slots))
+              for k, (ph, pol) in enumerate(layout) if ph == 0]
+        kd = abs(sum(ea)) / len(ea)
+        if kd > best_kw + 1e-9:
+            best, best_kw = layout, kd
+
+    if best is None:
+        return None, 0
+
+    # pitch factor of a coil spanning one slot
+    kp = abs(math.sin(math.pi * pp / n_slots))
+    kw = best_kw * kp
+    if kw < 0.1:
+        return None, 0
+    return best, kw
+
+def phase_chains(layout):
+    """ Order the coils of each phase into a series chain
+
+    Each coil has two terminals at its inner end: 'L' (the side at lower angle)
+    and 'R'. Current flowing L->R is taken as positive polarity.
+
+    Returns:
+        list: for each phase, list of (slot, entry terminal, exit terminal)
+    """
+    n_slots = len(layout)
+    chains = []
+    for ph in range(3):
+        slots = [k for k, (p, _) in enumerate(layout) if p == ph]
+        # start the chain after the largest angular gap, to keep links short
+        gaps = [((slots[(i+1) % len(slots)] - slots[i]) % n_slots, i) for i in range(len(slots))]
+        _, i_gap = max(gaps)
+        slots = slots[i_gap+1:] + slots[:i_gap+1]
+        chain = []
+        for k in slots:
+            pol = layout[k][1]
+            chain.append((k, 'L', 'R') if pol > 0 else (k, 'R', 'L'))
+        chains.append(chain)
+    return chains
+
 def coil_planner(type, r_in, r_out, dr, n_slot, n_loop, dir, start=0):
     if type == "radial":
         return radial(r_in, r_out, dr, n_slot, n_loop, dir, start)

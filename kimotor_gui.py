@@ -326,7 +326,7 @@ class KiMotorGUI ( wx.Frame ):
 		m_cbSchemeChoices = [ u"3P" ]
 		self.m_cbScheme = wx.ComboBox( sbSizer1.GetStaticBox(), wx.ID_ANY, u"3P", wx.DefaultPosition, wx.Size( 150,20 ), m_cbSchemeChoices, wx.CB_DROPDOWN|wx.CB_READONLY, wx.DefaultValidator, u"m_cbConnections" )
 		self.m_cbScheme.SetSelection( 1 )
-		bSizer23.Add( self.m_cbScheme, 0, wx.ALIGN_CENTER_HORIZONTAL|wx.ALL, 5 )
+		bSizer23.Add( self.m_cbScheme, 0, wx.ALL, 5 )
 
 
 		sbSizer1.Add( bSizer23, 1, wx.EXPAND, 5 )
@@ -596,7 +596,7 @@ class KiMotorGUI ( wx.Frame ):
 		bSizer3.Add( self.btn_clear, 0, wx.ALL, 5 )
 
 		self.btn_ok = wx.Button( self, wx.ID_OK, u"Generate", wx.DefaultPosition, wx.DefaultSize, 0, wx.DefaultValidator, u"btn_ok" )
-		bSizer3.Add( self.btn_ok, 0, wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_RIGHT, 5 )
+		bSizer3.Add( self.btn_ok, 0, wx.ALIGN_CENTER_VERTICAL, 5 )
 
 
 		bSizer5.Add( bSizer3, 0, wx.EXPAND|wx.TOP, 5 )
