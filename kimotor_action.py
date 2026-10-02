@@ -317,6 +317,13 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
 
         return self.check_geometry()
 
+    @staticmethod
+    def via_fan(n_layers):
+        """ Angular positions (in units of via pitch) of the vias that stitch
+        the coil layers, centered on the slot """
+        n_via = n_layers//2
+        return [k - (n_via-1)/2 for k in range(n_via)]
+
     def loops_fit(self, n_loops):
         """ Check that the coil loops, and the vias that stitch the coil layers
         (see do_windings), do not overlap """
@@ -333,8 +340,7 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
         r_clear = self.trk_w/2 + self.min_clear + self.d_via/2
         r_via_o = self.r_coil_out - (n_loops-1)*self.dr - r_clear
         thv_o = math.atan2(self.d_via + self.min_clear, r_via_o)
-        n_via = len(self.lset)/2
-        vias = range(0,1) if n_via==1 else range(int(-n_via/2), math.ceil(n_via/2))
+        vias = self.via_fan(len(self.lset))
         d = wp2 - wp1
         for viv in vias:
             for sgn in (1, -1):
@@ -555,7 +561,7 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
             n_loops (int): number of coil loops
 
         Returns:
-            list : list of coil start and end points
+            list, PCB_ARC, PCB_ARC : coil start and end points, first and last arc of the coil
         """
 
         net_coil = self.board.FindNet("coil")
@@ -563,6 +569,7 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
         # index of current point
         ip = 0 
         t0 = None
+        first = None
 
         # define how many sides 
         n_side = n_loops*4 - 1 
@@ -609,13 +616,80 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
             # add to group
             group.AddItem(t)
 
+            if first is None:
+                first = t
             t0 = t
         
         coil_se = []
         coil_se.append( self.fpoint( int(waypts[0][0,0]), int(waypts[0][0,1]) ) )
         coil_se.append( t.GetEnd() )
 
-        return coil_se
+        return coil_se, first, t
+
+    def stitch(self, arcs, at_end, th_v, r_v):
+        """ Join two coils, on adjacent layers, with a via
+
+        The coils meet at the same point, at the end (or start) of an arc
+        concentric to the motor axis. Each coil is trimmed, or extended along
+        that arc, to the angle of the via, then a radial track reaches the via.
+
+        Args:
+            arcs (list): the arcs of the two coils that end (or start) at the junction
+            at_end (bool): True if the junction is at the arcs end
+            th_v (float): angular position of the via
+            r_v (int): radial position of the via
+        """
+        net_coil = self.board.FindNet("coil")
+        wrap = lambda a: (a + math.pi) % (2*math.pi) - math.pi
+        polar = lambda r, a: self.fpoint(int(r*math.cos(a)), int(r*math.sin(a)))
+
+        xy_v = polar(r_v, th_v)
+        via = pcbnew.PCB_VIA(self.board)
+        via.SetViaType(pcbnew.VIATYPE_THROUGH)
+        via.SetPosition( xy_v )
+        via.SetDrill( self.d_drill )
+        via.SetWidth( self.d_via )
+        via.SetNet( net_coil )
+        self.board.Add(via)
+
+        for a in arcs:
+            j = a.GetEnd() if at_end else a.GetStart()
+            x = a.GetStart() if at_end else a.GetEnd()
+            r = math.hypot(j.x, j.y)
+            th_j = math.atan2(j.y, j.x)
+            d_x = wrap(math.atan2(x.y, x.x) - th_j)
+            d_v = wrap(th_v - th_j)
+
+            if abs(d_v)*r < 1000:
+                # via right below the junction
+                p = j
+            elif d_v*d_x > 0 and abs(d_v) < abs(d_x):
+                # the coil passes over the via: end the coil there
+                p = polar(r, th_j + d_v)
+                if at_end:
+                    a.SetEnd(p)
+                else:
+                    a.SetStart(p)
+                a.SetMid( polar(r, th_j + (d_x + d_v)/2) )
+            else:
+                # extend the coil up to the via
+                p = polar(r, th_j + d_v)
+                e = pcbnew.PCB_ARC(self.board)
+                e.SetNet(net_coil)
+                e.SetLayer(a.GetLayer())
+                e.SetWidth(self.trk_w)
+                e.SetStart(j)
+                e.SetMid( polar(r, th_j + d_v/2) )
+                e.SetEnd(p)
+                self.board.Add(e)
+
+            t = pcbnew.PCB_TRACK(self.board)
+            t.SetNet(net_coil)
+            t.SetWidth( self.trk_w )
+            t.SetLayer( a.GetLayer() )
+            t.SetStart( p )
+            t.SetEnd( xy_v )
+            self.board.Add(t)
 
     def do_windings(self, ri, ro, dr, n_slots, n_phases, n_loops=1, lset=None, mode=0):
         """ Generate the coil tracks (with fillet) on the given PCB layers
@@ -645,8 +719,7 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
         r_via_o = ro - (n_loops-1)*self.dr - r_clear
         thv_o = math.atan2(t_clear, r_via_o)
 
-        n_via = len(lset)/2
-        vias = range(0,1) if n_via==1 else range(int(-n_via/2), math.ceil(n_via/2))
+        vias = self.via_fan(len(lset))
         
         # generate coil waypoints
         if mode == 0:
@@ -693,144 +766,15 @@ class KiMotorDialog ( kimotor_gui.KiMotorGUI ):
                     wp = waypts_ccw1_R if i%2 else waypts_cw1_R
 
                 # generate coil 
-                coil_se = self.coil_tracker(wp, layer, n_loops, pgroup)
+                coil_se, first, last = self.coil_tracker(wp, layer, n_loops, pgroup)
                 
-                # connect coils across layers to create the winding
-                if i%2 and i<len(lset):
-                    
-                    # on odd layers (coil CCW) stitch coils' end points 
-                    iv = math.floor(i/2)
-
-                    # via index
-                    viv = vias[iv]
-
-                    # via coordinates
-                    xy_v = self.fpoint( 
-                        int(r_via_o*math.cos(th + thv_o*viv)), 
-                        int(r_via_o*math.sin(th + thv_o*viv)))
-                    
-                    # stitch
-                    via = pcbnew.PCB_VIA(self.board)
-                    via.SetViaType(pcbnew.VIATYPE_THROUGH)
-                    via.SetPosition( xy_v )
-                    via.SetDrill( self.d_drill )
-                    via.SetWidth( self.d_via )
-                    self.board.Add(via)
-
-                    #
-                    a = pcbnew.PCB_ARC(self.board)
-                    a.SetNet(net_coil)
-                    a.SetLayer(lset[i-1])
-                    a.SetWidth(self.trk_w)
-                    a.SetStart( coil_se[1] )
-                    a.SetEnd(
-                        self.fpoint( 
-                            int((r_via_o+r_clear)*math.cos(th + thv_o*vias[iv])), 
-                            int((r_via_o+r_clear)*math.sin(th + thv_o*vias[iv]))))
-                    a.SetMid(
-                        self.fpoint( 
-                            int((r_via_o+r_clear)*math.cos(th + thv_o*vias[iv] /2 )), 
-                            int((r_via_o+r_clear)*math.sin(th + thv_o*vias[iv] /2 ))))
-                    self.board.Add(a)
-
-                    if viv > 0:
-                        a = pcbnew.PCB_ARC(self.board)
-                        a.SetNet(net_coil)
-                        a.SetLayer(lset[i])
-                        a.SetWidth(self.trk_w)
-                        a.SetStart( coil_se[1] )
-                        a.SetEnd(
-                            self.fpoint( 
-                                int((r_via_o+r_clear)*math.cos(th + thv_o*viv)), 
-                                int((r_via_o+r_clear)*math.sin(th + thv_o*viv))))
-                        a.SetMid(
-                            self.fpoint( 
-                                int((r_via_o+r_clear)*math.cos(th + thv_o*viv /2 )), 
-                                int((r_via_o+r_clear)*math.sin(th + thv_o*viv /2 ))))
-                        self.board.Add(a)
-
-                    t = pcbnew.PCB_TRACK(self.board)
-                    t.SetNet(net_coil)
-                    t.SetWidth( self.trk_w )
-                    t.SetLayer( lset[i] )
-                    t.SetStart( a.GetEnd() )
-                    t.SetEnd( xy_v )
-                    self.board.Add(t)
-                    t = pcbnew.PCB_TRACK(self.board)
-                    a.SetNet(net_coil)
-                    t.SetWidth( self.trk_w )
-                    t.SetLayer( lset[i-1] )
-                    t.SetStart( a.GetEnd() )
-                    t.SetEnd( xy_v )
-                    self.board.Add(t)
-
-                # on even layers (coil CW), but first, stitch coils' start points
-                elif not i%2 and i>0:
-
-                    iv = int(i/2)
-
-                    # via index
-                    viv = vias[iv]
-
-                    xy_v = self.fpoint( 
-                        int(r_via*math.cos(th + thv*viv)), 
-                        int(r_via*math.sin(th + thv*viv)))
-                    
-                    # stitch
-                    via = pcbnew.PCB_VIA(self.board)
-                    via.SetViaType(pcbnew.VIATYPE_THROUGH)
-                    via.SetPosition( xy_v)
-                    via.SetDrill( self.d_drill )
-                    via.SetWidth( self.d_via )
-                    self.board.Add(via)
-                    
-                    a = pcbnew.PCB_ARC(self.board)
-                    a.SetNet(net_coil)
-                    a.SetLayer(lset[i-1])
-                    a.SetWidth(self.trk_w)
-                    a.SetStart( coil_se[0] )
-                    a.SetEnd(
-                        self.fpoint( 
-                            int((r_via+r_clear)*math.cos(th + thv*viv)), 
-                            int((r_via+r_clear)*math.sin(th + thv*viv))))
-                    a.SetMid(
-                        self.fpoint( 
-                            int((r_via+r_clear)*math.cos(th + thv*viv /2 )), 
-                            int((r_via+r_clear)*math.sin(th + thv*viv /2 ))))
-                    self.board.Add(a)
-                    
-                    if viv<0:
-                        a = pcbnew.PCB_ARC(self.board)
-                        a.SetNet(net_coil)
-                        a.SetLayer(lset[i])
-                        a.SetWidth(self.trk_w)
-                        a.SetStart( coil_se[0] )
-                        a.SetEnd(
-                            self.fpoint( 
-                                int((r_via+r_clear)*math.cos(th + thv*viv)), 
-                                int((r_via+r_clear)*math.sin(th + thv*viv))))
-                        a.SetMid(
-                            self.fpoint( 
-                                int((r_via+r_clear)*math.cos(th + thv*viv /2 )), 
-                                int((r_via+r_clear)*math.sin(th + thv*viv /2 ))))
-                        self.board.Add(a)
-
-                    
-                    t = pcbnew.PCB_TRACK(self.board)
-                    t.SetNet(net_coil)
-                    t.SetWidth( self.trk_w )
-                    t.SetLayer( lset[i] )
-                    t.SetStart( a.GetEnd() )
-                    t.SetEnd( xy_v )
-                    self.board.Add(t)
-                    t = pcbnew.PCB_TRACK(self.board)
-                    t.SetNet(net_coil)
-                    t.SetWidth( self.trk_w )
-                    t.SetLayer( lset[i-1] )
-                    t.SetStart( a.GetEnd() )
-                    t.SetEnd( xy_v )
-                    self.board.Add(t)
-
+                # connect coils across layers to create the winding: odd layers
+                # join the previous one at the outer end, even layers at the inner end
+                if i%2:
+                    self.stitch([prev_last, last], True, th + thv_o*vias[i//2], r_via_o)
+                elif i>0:
+                    self.stitch([prev_first, first], False, th + thv*vias[i//2], r_via)
+                prev_first, prev_last = first, last
 
                 # append first and last only
                 if i==0 or i==len(lset)-1:
